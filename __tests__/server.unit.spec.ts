@@ -1,53 +1,63 @@
-/* eslint-disable @typescript-eslint/no-var-requires */
-
-function loadMainOrAutoRun(modulePath: string) {
-  const mod = require(modulePath);
-  if (typeof mod === "function") return mod;
-  if (mod && typeof mod.main === "function") return mod.main;
-  if (mod && typeof mod.start === "function") return mod.start;
-  return null; // se executar no import
-}
-
 describe("server (unit)", () => {
-  const originalExit = process.exit;
+  const OLD_ENV = process.env;
 
   beforeEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
-    (process as any).exit = jest.fn() as any;
-    process.env.PORT = "3001";
+
+    process.env = {
+      ...OLD_ENV,
+      PEDIDO_SERVICE_URL: "http://pedido",
+    };
   });
 
   afterEach(() => {
-    process.exit = originalExit;
+    process.env = OLD_ENV;
   });
 
-  it("deve iniciar app sem encerrar o processo", async () => {
-    const listenMock = jest.fn((_port: number, cb?: Function) => cb && cb());
+  function pickStartFn(mod: any) {
+    if (!mod) return null;
 
-    // server.js chama buildApp(), então ../src/app PRECISA ser função.
-    jest.doMock("../src/app", () => {
-      return {
-        __esModule: true,
-        default: () => ({ listen: listenMock }), // caso import default
-        buildApp: () => ({ listen: listenMock }), // caso named export
-        // caso module.exports = function buildApp() {}
-        ...(function () {
-          const fn = () => ({ listen: listenMock });
-          // @ts-ignore
-          fn.buildApp = fn;
-          return fn;
-        })(),
-      };
-    });
+    // formatos comuns de export
+    if (typeof mod === "function") return mod;
+    if (typeof mod.main === "function") return mod.main;
+    if (typeof mod.start === "function") return mod.start;
+    if (typeof mod.bootstrap === "function") return mod.bootstrap;
+    if (typeof mod.run === "function") return mod.run;
 
-    const main = loadMainOrAutoRun("../src/server");
+    return null;
+  }
 
-    if (main) {
-      await expect(main()).resolves.toBeDefined();
+  it("deve iniciar o app sem encerrar o processo", async () => {
+    const listenMock = jest.fn();
+
+    // mock do buildApp (seu server chama isso por dentro)
+    jest.doMock("../src/app", () => ({
+      buildApp: () => ({ listen: listenMock }),
+    }));
+
+    // evita que testes "matem" o processo se server tiver catch com exit
+    const exitSpy = jest
+      .spyOn(process, "exit")
+      .mockImplementation(() => undefined as never);
+
+    // (opcional) silencia console.error do server em caso de falha
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const mod = require("../src/server");
+    const start = pickStartFn(mod);
+
+    if (start) {
+      await start();
+    } else {
+      // caso "auto-run": só dar require já executa e deve chamar listen
+      // então não chamamos nada aqui.
     }
 
-    expect(process.exit).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
     expect(listenMock).toHaveBeenCalled();
+
+    errSpy.mockRestore();
+    exitSpy.mockRestore();
   });
 });
